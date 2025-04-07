@@ -1,0 +1,26 @@
+# Virtual Environment
+venv/
+.venv
+
+# Models and data
+models/
+samples/
+
+# HuggingFace cache
+.cache/
+.huggingface/
+*/.cache/huggingface/
+**/proper_cache/
+
+# Logs and temp files
+logs/
+
+# IDE specific files
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Generated transcripts
+transcript.txt
+transcript.srt

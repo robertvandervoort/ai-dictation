@@ -1,0 +1,42 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+--find-links https://download.pytorch.org/whl/torch_stable.html
+
+# Base dependencies
+numpy
+packaging
+typing-extensions
+filelock
+protobuf
+psutil
+pynvml
+
+# PyTorch and audio basics
+torch
+torchaudio
+soundfile
+ffmpeg-python
+
+# Audio processing
+librosa
+# torch-audiomentations
+# torch-pitch-shift
+
+# ML frameworks
+transformers
+sentencepiece
+accelerate
+# einops
+# pytorch-metric-learning
+huggingface_hub
+# torchmetrics
+
+# Diarization (core must be before audio)
+pyannote.core
+pyannote.audio
+
+# Speech recognition
+# openai-whisper
+faster-whisper
+
+# UI
+streamlit
