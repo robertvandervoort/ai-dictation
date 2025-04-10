@@ -25,6 +25,16 @@ except ImportError:
     print("pynvml not found. Using PyTorch metrics for GPU memory usage.")
     # The dependency is in requirements.txt - use pip install -r requirements.txt to install it
 
+# Check for Apple Silicon (Metal) support
+APPLE_SILICON_AVAILABLE = torch.backends.mps.is_available() if hasattr(torch.backends, 'mps') else False
+
+# Check for AMD ROCm support
+try:
+    import torch.utils.hipify
+    AMD_ROCM_AVAILABLE = hasattr(torch.version, 'hip') and torch.version.hip is not None
+except (ImportError, AttributeError):
+    AMD_ROCM_AVAILABLE = False
+
 # Add a comprehensive language map for Whisper at the top of the file, after the imports
 # This defines all languages that Whisper supports for both transcription and translation
 WHISPER_LANGUAGE_MAP = {
@@ -142,9 +152,31 @@ def get_language_name(language_code):
     return WHISPER_LANGUAGE_MAP.get(language_code, language_code)
 
 # Function to get memory usage metrics
-def get_memory_metrics(use_gpu=False):
+def get_system_memory_metrics(source="psutil", model=None):
+    """Get system RAM usage metrics in a consistent format."""
+    memory = psutil.virtual_memory()
+    metrics = {
+        "used": memory.used / (1024**3),  # GB
+        "total": memory.total / (1024**3),  # GB
+        "free": memory.available / (1024**3),  # GB
+        "usage_percent": memory.percent,
+        "source": source
+    }
+    
+    # Add model info if provided
+    if model:
+        metrics["model"] = model
+        
+    return metrics
+
+def get_memory_metrics(use_gpu=False, gpu_type=None):
     """Get system RAM or GPU memory usage."""
-    if use_gpu and torch.cuda.is_available():
+    if not use_gpu:
+        # System RAM usage
+        return get_system_memory_metrics()
+    
+    # NVIDIA GPU
+    if gpu_type == "nvidia" and torch.cuda.is_available():
         # Try using direct nvidia-smi call first (most accurate)
         try:
             import subprocess
@@ -251,16 +283,152 @@ def get_memory_metrics(use_gpu=False):
             "usage_percent": usage_percent,
             "source": "pytorch"
         }
-    else:
-        # System RAM usage
-        memory = psutil.virtual_memory()
-        return {
-            "used": memory.used / (1024**3),  # GB
-            "total": memory.total / (1024**3),  # GB
-            "free": memory.available / (1024**3),  # GB
-            "usage_percent": memory.percent,
-            "source": "psutil"
-        }
+    
+    # Apple Silicon (M series)
+    elif gpu_type == "apple" and APPLE_SILICON_AVAILABLE:
+        try:
+            # Unfortunately, PyTorch doesn't provide memory info for MPS
+            # Use subprocess to run system command to get memory info
+            import subprocess
+            
+            # Try to get Apple GPU information using sysctl
+            if platform.system() == "Darwin":
+                try:
+                    # Get total GPU memory (this is an approximation)
+                    # This command gets integrated GPU memory on Apple Silicon
+                    # Note: The actual available GPU memory might be dynamic and share with system memory
+                    result = subprocess.run(['sysctl', 'hw.memsize'], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        # Parse the memory size (total system memory is used as an approximation)
+                        total_mem_bytes = int(result.stdout.strip().split(':')[1].strip())
+                        total_gpu_mem = total_mem_bytes / (1024**3) / 2  # Assume half of system memory
+                        
+                        # Get Apple Silicon model info
+                        model_result = subprocess.run(['sysctl', 'hw.model'], capture_output=True, text=True)
+                        model_name = "Apple Silicon"
+                        if model_result.returncode == 0:
+                            model_name = model_result.stdout.strip().split(':')[1].strip()
+                        
+                        # Get active memory usage - this is an approximation
+                        # For M series, we don't have exact GPU memory usage, so estimate based on allocated tensor memory
+                        if hasattr(torch.mps, 'current_allocated_memory'):
+                            allocated_bytes = torch.mps.current_allocated_memory()
+                            used_gpu_mem = allocated_bytes / (1024**3)
+                        else:
+                            # Assume 25% usage if we can't get actual numbers
+                            used_gpu_mem = total_gpu_mem * 0.25
+                        
+                        free_gpu_mem = total_gpu_mem - used_gpu_mem
+                        usage_percent = (used_gpu_mem / total_gpu_mem) * 100
+                        
+                        print("GPU Memory Debugging (Apple Silicon):")
+                        print(f"  Apple model: {model_name}")
+                        print(f"  Approximate total: {total_gpu_mem:.2f} GB")
+                        print(f"  Estimated used: {used_gpu_mem:.2f} GB")
+                        print(f"  Estimated free: {free_gpu_mem:.2f} GB")
+                        print(f"  FINAL VALUES (Apple Silicon): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                        
+                        return {
+                            "used": used_gpu_mem,
+                            "total": total_gpu_mem,
+                            "free": free_gpu_mem,
+                            "usage_percent": usage_percent,
+                            "source": "apple-sysctl",
+                            "model": model_name
+                        }
+                except Exception as e:
+                    print(f"Error getting Apple Silicon metrics: {e}")
+                    # Fall back to a simple estimate
+                    pass
+        
+        except:                    
+            print(f"Error getting Apple Silicon metrics: {e}")
+            # Fall back to system memory info
+            return get_system_memory_metrics(source="system-ram-fallback", model="Apple Silicon")
+        
+    # AMD GPU (ROCm)
+    elif gpu_type == "amd" and AMD_ROCM_AVAILABLE:
+        try:
+            # Use rocm-smi if available
+            import subprocess
+            
+            try:
+                # Run rocm-smi command to get memory info
+                rocm_process = subprocess.Popen(
+                    ['rocm-smi', '--showmeminfo', 'vram', '--json'], 
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                out_str, _ = rocm_process.communicate()
+                
+                # Parse JSON output
+                import json
+                data = json.loads(out_str)
+                
+                # Extract memory info from first GPU
+                card_data = next(iter(data.values()))
+                total_gpu_mem = int(card_data.get("VRAM Total", "0").split()[0]) / 1024  # Convert to GB
+                used_gpu_mem = int(card_data.get("VRAM Used", "0").split()[0]) / 1024
+                free_gpu_mem = total_gpu_mem - used_gpu_mem
+                usage_percent = (used_gpu_mem / total_gpu_mem) * 100 if total_gpu_mem > 0 else 0
+                
+                # Get GPU name
+                name_process = subprocess.Popen(
+                    ['rocm-smi', '--showproductname'], 
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                name_out, _ = name_process.communicate()
+                gpu_name = name_out.decode('utf-8').strip().split('\n')[-1].strip()
+                
+                print("GPU Memory Debugging (ROCm):")
+                print(f"  AMD GPU: {gpu_name}")
+                print(f"  rocm-smi total: {total_gpu_mem:.2f} GB")
+                print(f"  rocm-smi used: {used_gpu_mem:.2f} GB")
+                print(f"  rocm-smi free: {free_gpu_mem:.2f} GB")
+                print(f"  FINAL VALUES (rocm-smi): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                
+                return {
+                    "used": used_gpu_mem,
+                    "total": total_gpu_mem,
+                    "free": free_gpu_mem,
+                    "usage_percent": usage_percent,
+                    "source": "rocm-smi",
+                    "model": gpu_name
+                }
+            except Exception as e:
+                print(f"Error getting AMD GPU metrics from rocm-smi: {e}")
+                # Fall back to PyTorch metrics
+                pass
+            
+            # Fall back to PyTorch metrics for AMD GPU
+            # HIP (ROCm) should provide memory stats similar to CUDA
+            if hasattr(torch.hip, 'get_device_properties'):
+                total_gpu_mem = torch.hip.get_device_properties(0).total_memory / (1024**3)
+                allocated_gpu_mem = torch.hip.memory_allocated(0) / (1024**3)
+                reserved_gpu_mem = torch.hip.memory_reserved(0) / (1024**3)
+                free_gpu_mem = total_gpu_mem - reserved_gpu_mem
+                usage_percent = (reserved_gpu_mem / total_gpu_mem) * 100 if total_gpu_mem > 0 else 0
+                
+                print("GPU Memory Debugging (PyTorch HIP):")
+                print(f"  PyTorch total: {total_gpu_mem:.2f} GB")
+                print(f"  PyTorch reserved: {reserved_gpu_mem:.2f} GB")
+                print(f"  PyTorch allocated: {allocated_gpu_mem:.2f} GB")
+                print(f"  FINAL VALUES (PyTorch HIP): used={reserved_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                
+                return {
+                    "used": reserved_gpu_mem,
+                    "allocated": allocated_gpu_mem,
+                    "total": total_gpu_mem,
+                    "free": free_gpu_mem,
+                    "usage_percent": usage_percent,
+                    "source": "pytorch-hip"
+                }
+        except Exception as e:
+            print(f"Error getting AMD GPU metrics: {e}")
+            # Fall back to system memory metrics
+            return get_system_memory_metrics(source="system-ram-fallback", model="AMD GPU")
+    
+    # If no GPU or unsupported GPU type, return system RAM usage
+    return get_system_memory_metrics()
 
 # Initialize session state variables if they don't exist
 if 'debug_mode' not in st.session_state:
@@ -288,7 +456,13 @@ if 'memory_needs_update' not in st.session_state:
 # transformers_debug = False
 
 # Display CUDA information - helpful for debugging
+gpu_info = {}
+
+# Check for different GPU types
 cuda_available = torch.cuda.is_available()
+mps_available = APPLE_SILICON_AVAILABLE
+rocm_available = AMD_ROCM_AVAILABLE
+
 if cuda_available:
     device_count = torch.cuda.device_count()
     device_name = torch.cuda.get_device_name(0) if device_count > 0 else "Unknown"
@@ -297,8 +471,64 @@ if cuda_available:
     print(f"CUDA version: {cuda_version}")
     print(f"GPU count: {device_count}")
     print(f"GPU device name: {device_name}")
+    gpu_info = {
+        "type": "nvidia",
+        "name": device_name,
+        "count": device_count,
+        "version": cuda_version
+    }
+elif mps_available:
+    print("MPS (Apple Silicon) is available for GPU acceleration")
+    # Get Apple Silicon model info if possible
+    model_name = "Apple Silicon"
+    try:
+        import subprocess
+        model_result = subprocess.run(['sysctl', 'hw.model'], capture_output=True, text=True)
+        if model_result.returncode == 0:
+            model_name = model_result.stdout.strip().split(':')[1].strip()
+    except:
+        pass
+    
+    print(f"Apple Silicon model: {model_name}")
+    gpu_info = {
+        "type": "apple",
+        "name": model_name,
+        "count": 1,
+        "version": platform.mac_ver()[0] if platform.system() == "Darwin" else "Unknown"
+    }
+elif rocm_available:
+    print("ROCm is available for AMD GPU acceleration")
+    hip_version = torch.version.hip if hasattr(torch.version, 'hip') else "Unknown"
+    
+    # Try to get AMD GPU name using rocm-smi
+    gpu_name = "AMD GPU"
+    try:
+        import subprocess
+        name_process = subprocess.Popen(
+            ['rocm-smi', '--showproductname'], 
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        name_out, _ = name_process.communicate()
+        gpu_name = name_out.decode('utf-8').strip().split('\n')[-1].strip()
+    except:
+        pass
+    
+    print(f"ROCm version: {hip_version}")
+    print(f"AMD GPU name: {gpu_name}")
+    gpu_info = {
+        "type": "amd",
+        "name": gpu_name,
+        "count": 1,
+        "version": hip_version
+    }
 else:
-    print("CUDA is not available. Running on CPU only.")
+    print("No GPU acceleration is available. Running on CPU only.")
+    gpu_info = {
+        "type": "cpu",
+        "name": "CPU",
+        "count": 0,
+        "version": "N/A"
+    }
 
 # Fix SpeechBrain deprecation warnings
 os.environ["SPEECHBRAIN_SILENCE_DEPRECATION_PRETRAINED"] = "1"
@@ -343,6 +573,20 @@ patch_streamlit_file_watcher()
 def torch_parameter_hash(parameter):
     return parameter.data.numpy().tobytes()
 
+def get_device_for_model(use_gpu=False):
+    """Helper function to get the appropriate device for loading models"""
+    if not use_gpu:
+        return "cpu"
+    
+    if cuda_available:
+        return "cuda"
+    elif mps_available:
+        return "mps"
+    elif rocm_available:
+        return "cuda"  # PyTorch ROCm uses "cuda" as device name for compatibility
+    else:
+        return "cpu"
+
 # Model Selection with Hugging Face Authentication
 @st.cache_resource(hash_funcs={torch.nn.parameter.Parameter: torch_parameter_hash})
 def load_diarization_model(use_gpu=False):
@@ -354,9 +598,10 @@ def load_diarization_model(use_gpu=False):
             use_auth_token=hf_token
         )
         
-        # Move to GPU if requested and available
+        # Move to appropriate device if requested and available
         if use_gpu:
-            pipeline.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+            device = get_device_for_model(use_gpu)
+            pipeline.to(torch.device(device))
             
         return pipeline
     except Exception as e:
@@ -368,8 +613,19 @@ def load_whisper_model(model_size="base", use_gpu=False):
     '''Load the Whisper model using faster-whisper (CTranslate2 implementation)'''
     try:
         # Set device and compute type based on GPU availability
-        device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if use_gpu and torch.cuda.is_available() else "int8"
+        device = "cpu"
+        compute_type = "int8"
+        
+        if use_gpu:
+            # CTranslate2 supports CUDA and CPU, but not MPS directly
+            # For Apple Silicon, we use CPU with optimized int8 computation
+            # For NVIDIA and AMD with CUDA/ROCm, we use GPU
+            if cuda_available or rocm_available:
+                device = "cuda"
+                compute_type = "float16"
+            else:
+                # On Apple Silicon, use optimized CPU mode (or auto which may use Metal via system libraries)
+                device = "auto" if platform.system() == "Darwin" else "cpu"
         
         # Use GPU if requested and available
         model = WhisperModel(model_size, device=device, compute_type=compute_type, download_root="./models")
@@ -385,9 +641,10 @@ def load_wav2vec2_model(model_name="facebook/wav2vec2-base-960h", use_gpu=False)
         processor = Wav2Vec2Processor.from_pretrained(model_name)
         model = Wav2Vec2ForCTC.from_pretrained(model_name)
         
-        # Move to GPU if requested and available
-        if use_gpu and torch.cuda.is_available():
-            model = model.to("cuda")
+        # Move to appropriate device if requested and available
+        if use_gpu:
+            device = get_device_for_model(use_gpu)
+            model = model.to(device)
             
         return model, processor
     except Exception as e:
@@ -604,7 +861,7 @@ def transcribe_wav2vec2_segment(audio_array, start_time, end_time, model, proces
         return "", None
 
 # Main upload area with additional instructions
-st.title("Meeting Transcription with Speaker Diarization")
+st.title("Meeting Transcription with Speaker Diarization and Translation")
 st.subheader("Upload your meeting recording")
 
 # Settings in sidebar
@@ -625,18 +882,28 @@ with st.sidebar:
     should_update = (current_time - st.session_state.last_memory_update > 10) or st.session_state.memory_needs_update
     
     # GPU/CPU selection - define this early because we need it for the performance meter
-    gpu_available = torch.cuda.is_available()
     use_gpu = False
+    gpu_type = None
     
-    if gpu_available:
+    # Check available GPU types and provide appropriate UI
+    if cuda_available or mps_available or rocm_available:
         use_gpu = st.checkbox(
             "Use GPU acceleration", 
             value=True,
-            help="Run models on GPU for faster processing (requires CUDA-compatible GPU)"
+            help="Run models on GPU for faster processing (requires compatible GPU)"
         )
+        
+        # Determine GPU type based on availability
+        if use_gpu:
+            if cuda_available:
+                gpu_type = "nvidia"
+            elif mps_available:
+                gpu_type = "apple"
+            elif rocm_available:
+                gpu_type = "amd"
     
-    # Get memory metrics
-    metrics = get_memory_metrics(use_gpu)
+    # Get memory metrics based on GPU type
+    metrics = get_memory_metrics(use_gpu, gpu_type)
     
     # Use containers instead of direct calls to allow updating
     metrics_container = st.container()
@@ -646,23 +913,28 @@ with st.sidebar:
             st.session_state.metrics_placeholder = metrics_container
         
         # Create a progress bar for memory usage
-        if use_gpu and torch.cuda.is_available():
-            st.markdown(f"**GPU Memory** ({torch.cuda.get_device_name(0)})")
-            mem_bar = st.progress(float(metrics["usage_percent"]) / 100)
-            st.caption(f"{metrics['used']:.1f}GB used / {metrics['total']:.1f}GB total ({metrics['usage_percent']:.1f}%)")
+        if use_gpu:
+            if gpu_type == "nvidia" and cuda_available:
+                st.markdown(f"**GPU Memory** ({torch.cuda.get_device_name(0)})")
+                mem_bar = st.progress(float(metrics["usage_percent"]) / 100)
+                st.caption(f"{metrics['used']:.1f}GB used / {metrics['total']:.1f}GB total ({metrics['usage_percent']:.1f}%)")
+            elif gpu_type == "apple" and mps_available:
+                model_name = metrics.get("model", "Apple Silicon")
+                st.markdown(f"**GPU Memory** ({model_name})")
+                mem_bar = st.progress(float(metrics["usage_percent"]) / 100)
+                st.caption(f"{metrics['used']:.1f}GB used / {metrics['total']:.1f}GB total ({metrics['usage_percent']:.1f}%)")
+                st.caption("Note: Memory values are estimates for Apple Silicon")
+            elif gpu_type == "amd" and rocm_available:
+                model_name = metrics.get("model", "AMD GPU")
+                st.markdown(f"**GPU Memory** ({model_name})")
+                mem_bar = st.progress(float(metrics["usage_percent"]) / 100)
+                st.caption(f"{metrics['used']:.1f}GB used / {metrics['total']:.1f}GB total ({metrics['usage_percent']:.1f}%)")
             
             # Show data source and additional details if debug mode is on
             if st.session_state.debug_mode:
                 st.caption(f"Source: {metrics['source']}")
-                if metrics['source'] == 'pytorch':
-                    st.caption(f"Allocated: {metrics['allocated']:.1f}GB | Reserved: {metrics['used']:.1f}GB")
-                    st.caption(f"Raw PyTorch values - no padding added")
-                elif metrics['source'] == 'nvml':
-                    st.caption(f"Free: {metrics['free']:.1f}GB (from NVIDIA driver)")
-                    st.caption(f"Raw NVML values from GPU driver")
-                elif metrics['source'] == 'nvidia-smi':
-                    st.caption(f"Free: {metrics['free']:.1f}GB (from nvidia-smi)")
-                    st.caption(f"Raw values from nvidia-smi command")
+                if 'allocated' in metrics:
+                    st.caption(f"Allocated: {metrics['allocated']:.1f}GB | Used: {metrics['used']:.1f}GB")
         else:
             st.markdown("**System RAM**")
             mem_bar = st.progress(float(metrics["usage_percent"]) / 100)
@@ -726,14 +998,23 @@ with st.sidebar:
     )
     
     # GPU/CPU selection info display
-    if gpu_available:
-        if use_gpu:
-            gpu_info = f"GPU: {torch.cuda.get_device_name(0)}"
-            st.success(f"✓ {gpu_info}")
+    if use_gpu:
+        if gpu_type == "nvidia":
+            model_name = f"{torch.cuda.get_device_name(0)}"
+            st.success(f"✓ GPU: {model_name}")
+        elif gpu_type == "apple":
+            model_name = metrics.get("model", "Apple Silicon")
+            st.success(f"✓ GPU: {model_name}")
+        elif gpu_type == "amd":
+            model_name = metrics.get("model", "AMD GPU")
+            st.success(f"✓ GPU: {model_name}")
         else:
-            st.info("Running on CPU (enable GPU for faster processing)")
+            st.info("GPU type not detected. Running on CPU.")
     else:
-        st.info("GPU not detected. Running on CPU.")
+        if cuda_available or mps_available or rocm_available:
+            st.info("Running on CPU (enable GPU for faster processing)")
+        else:
+            st.info("No compatible GPU detected. Running on CPU.")
     
     # Model selection based on engine
     if transcription_engine == "Whisper (Optimized)":
