@@ -50,10 +50,10 @@ Due to these findings, **Wav2Vec2 will be removed in an upcoming release** to st
 | **Wav2Vec2 XLS-R 300M** | 300M | ~1.2GB | ~3GB | ~3x | 128+ |
 | **Seamless M4T v2 large** | 1.2B | ~4.8GB | ~8GB | ~2x | 100+ |
 
-**Processing performance** (approximate, RTX 3090):
+**Processing performance** (approximate, RTX 4090): (UPDATE WITH REAL METRICS ON VARIOUS HARDWARE)
 - Whisper large-v3: ~12x faster than real-time (1 minute audio processed in ~5 seconds)
 - Seamless M4T: ~6x faster than real-time (1 minute audio processed in ~10 seconds)
-- Speaker diarization: ~20x faster than real-time
+- Speaker diarization: ...
 
 ## Installation
 
@@ -183,43 +183,6 @@ The application offers several speech recognition models:
   - Seamless M4T performs best on Linux with the native implementation
   - Windows/macOS users may see better performance with Whisper for large files
 
-## Evaluation Metrics
-
-Our internal benchmarks show the following performance metrics:
-
-### Word Error Rate (WER)
-
-| Model | English | Spanish | French | German | Mandarin | Average |
-|-------|---------|---------|--------|--------|----------|---------|
-| Whisper tiny | 9.2% | 12.1% | 13.4% | 14.8% | 18.7% | 13.6% |
-| Whisper base | 7.8% | 10.5% | 11.9% | 13.2% | 17.3% | 12.1% |
-| Whisper small | 6.1% | 8.7% | 9.8% | 11.0% | 15.1% | 10.1% |
-| Whisper medium | 5.0% | 7.2% | 8.2% | 9.3% | 12.8% | 8.5% |
-| Whisper large-v3 | 3.8% | 5.9% | 6.7% | 7.8% | 11.0% | 7.0% |
-| Wav2Vec2 base | 12.3% | 26.8% | 25.3% | 27.1% | 39.2% | 26.1% |
-| Seamless M4T v2 | 4.5% | 6.3% | 7.0% | 8.1% | 11.8% | 7.5% |
-
-*Benchmark datasets: LibriSpeech (English), Common Voice (multilingual)*
-
-### Diarization Error Rate (DER)
-
-The PyAnnote speaker diarization model achieves an average DER of 5.8% on meeting recordings with 2-6 speakers, with performance degrading in situations with significant speaker overlap (reaching ~12% DER with >30% overlap).
-
-### Translation Quality (BLEU scores)
-
-| Source→Target | Whisper | Seamless M4T |
-|---------------|---------|--------------|
-| Spanish→English | 31.2 | 34.8 |
-| French→English | 30.5 | 33.9 |
-| German→English | 28.7 | 32.6 |
-| Mandarin→English | 23.4 | 27.9 |
-| English→Spanish | 29.7 | 33.1 |
-| English→French | 28.8 | 32.5 |
-| English→German | 26.9 | 30.8 |
-| English→Mandarin | 21.5 | 25.3 |
-
-*BLEU scores calculated using sacrebleu on WMT reference sets*
-
 ## Implementation Details
 
 ### Speaker Diarization
@@ -250,38 +213,6 @@ The PyAnnote speaker diarization model achieves an average DER of 5.8% on meetin
 - **Very Long Files**: Files exceeding 2 hours may require significant memory and processing time
 - **Low-quality Audio**: Recordings with sampling rates below 16kHz or significant compression artifacts show reduced accuracy
 
-## API Usage
-
-While the application is primarily designed with a Streamlit UI, the core functionality can be accessed programmatically:
-
-```python
-from dictate import transcribe_whisper_segment, load_diarization_model, load_whisper_model
-
-# Load models
-diarization_model = load_diarization_model(use_gpu=True)
-whisper_model = load_whisper_model("small", use_gpu=True)
-
-# Process audio file
-audio_file = "meeting.wav"
-
-# Perform diarization
-diarization_results = diarization_model({"waveform": audio, "sample_rate": 16000})
-
-# Process each segment
-for segment, track, speaker in diarization_results.itertracks(yield_label=True):
-    start_time = segment.start
-    end_time = segment.end
-    
-    # Transcribe segment
-    text, detected_language = transcribe_whisper_segment(
-        audio_file, start_time, end_time, whisper_model
-    )
-    
-    print(f"Speaker {speaker} [{start_time:.2f}-{end_time:.2f}]: {text}")
-```
-
-See `dictate.py` for additional API functions and parameters.
-
 ## Customization Options
 
 ### Fine-tuning for Domain-specific Vocabulary
@@ -290,22 +221,6 @@ While not included in the UI, advanced users can fine-tune the models for domain
 
 1. For Whisper, see the [OpenAI fine-tuning documentation](https://github.com/openai/whisper/discussions/1087)
 2. For Seamless M4T, see Meta's [fine-tuning guide](https://github.com/facebookresearch/seamless_communication/tree/main/examples/seamless_m4t_v2)
-
-### Adding Custom Languages
-
-Language support can be extended by:
-
-1. Adding language codes and names to `WHISPER_LANGUAGE_MAP` in `dictate.py`
-2. Creating a mapping between language codes for Whisper, Seamless, and NLLB models
-3. Testing with sample content to verify compatibility
-
-### Hardware Optimizations
-
-For specialized hardware:
-
-- CUDA optimization settings can be adjusted in the model loading functions
-- For ROCm (AMD GPUs), modify the device parameters in the model loading functions
-- For Apple Silicon, use MPS as the device for compatible models
 
 ## Research Citations
 
@@ -375,13 +290,12 @@ To add a new ASR model:
 
 ## Future Roadmap
 
-- **Q3 2024**: Advanced diarization to identify overlapping speakers
-- **Q3 2024**: Voice cloning for speech-to-speech translation
-- **Q4 2024**: Domain-specific fine-tuning UI for technical/medical/legal terminology
-- **Q4 2024**: Real-time transcription mode for live meetings
-- **Q1 2025**: Custom wake word detection for speaker attribution
-- **Q1 2025**: Integration with semantic analysis for topic extraction and summarization
-- **Q2 2025**: Distributed processing for extremely large audio files
+- Automatic speaker name identification using information from introductions in meetings
+- Advanced diarization to identify overlapping speakers
+- Voice cloning for speech-to-speech and text to speech translation
+- Transcript to speech output for many lanugage translation
+- Real-time transcription mode for live meetings
+- Integration with semantic analysis for topic extraction and summarization
 
 ## License
 
