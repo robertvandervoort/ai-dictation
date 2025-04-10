@@ -742,17 +742,9 @@ def transcribe_whisper_segment(audio_path, start_time, end_time, model, sample_r
                 
                 # Map language code to full name if we have a language code
                 if lang_code:
-                    """
-                    # Special case for Japanese since it's causing issues
-                    if lang_code == "ja":
-                        detected_language = "Japanese"
-                        print("Debug - Explicitly setting Japanese for 'ja' code")
-                    else:
-                        detected_language = WHISPER_LANGUAGE_MAP.get(lang_code, lang_code.title())
-                    """
                     detected_language = WHISPER_LANGUAGE_MAP.get(lang_code, lang_code.title())
-                        
                     print(f"Debug - Mapped language '{lang_code}' to '{detected_language}' from map: {WHISPER_LANGUAGE_MAP.get(lang_code)}")
+            
             except Exception as lang_err:
                 # If we can't get language info, just proceed without it
                 if st.session_state.get('debug_mode', False):
