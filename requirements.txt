@@ -39,4 +39,4 @@ pyannote.audio
 faster-whisper
 
 # UI
-streamlit
+streamlit==1.44.0
