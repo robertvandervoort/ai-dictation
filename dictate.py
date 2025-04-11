@@ -2,7 +2,7 @@ import streamlit as st
 import torch
 import numpy as np
 import pyannote.audio as paa
-from pyannote.core import Segment
+#from pyannote.core import Segment
 import tempfile
 import os
 import librosa
@@ -17,13 +17,41 @@ import warnings
 import platform
 import hashlib
 import psutil
+import importlib
+import types
+# import sys
+import logging
+
+#keep streamlit from whining about torch.classes    
+torch.classes.__path__ = []
+
+# Set to True to enable regular (non-debug) console output
+# Set to False to suppress most console output
+DEBUG_CONSOLE_OUTPUT = False
+
+# Configure logging to suppress noisy messages
+logging.getLogger("torch").setLevel(logging.ERROR)
+logging.getLogger("torchaudio").setLevel(logging.ERROR)
+logging.getLogger("pyannote").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+logging.getLogger("librosa").setLevel(logging.WARNING)
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("asyncio").setLevel(logging.ERROR)
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", message="Torchaudio's I/O functions now support par-call bakcend dispatch")
+warnings.filterwarnings("ignore", message="torch.classes is an experimental")
+warnings.filterwarnings("ignore", message="torch._C._get_custom_class_python_wrapper")
+warnings.filterwarnings("ignore", message="Tried to instantiate class")
+
 try:
     import pynvml
     PYNVML_AVAILABLE = True
 except ImportError:
     PYNVML_AVAILABLE = False
-    print("pynvml not found. Using PyTorch metrics for GPU memory usage.")
-    # The dependency is in requirements.txt - use pip install -r requirements.txt to install it
+    if DEBUG_CONSOLE_OUTPUT:
+        print("pynvml not found. Using PyTorch metrics for GPU memory usage.")
 
 # Check for Apple Silicon (Metal) support
 APPLE_SILICON_AVAILABLE = torch.backends.mps.is_available() if hasattr(torch.backends, 'mps') else False
@@ -151,6 +179,12 @@ def get_language_name(language_code):
     """Convert a language code to its name"""
     return WHISPER_LANGUAGE_MAP.get(language_code, language_code)
 
+# Add a debug logging function right after the imports and global variables
+def debug_log(message):
+    """Log debug information only when debug mode is enabled."""
+    if 'debug_mode' in st.session_state and st.session_state.debug_mode:
+        print(message)
+
 # Function to get memory usage metrics
 def get_system_memory_metrics(source="psutil", model=None):
     """Get system RAM usage metrics in a consistent format."""
@@ -198,11 +232,11 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                 usage_percent = (used_gpu_mem / total_gpu_mem) * 100 if total_gpu_mem > 0 else 0
                 
                 # Print nvidia-smi values for debugging
-                print("GPU Memory Debugging (nvidia-smi):")
-                print(f"  nvidia-smi total: {total_gpu_mem:.2f} GB")
-                print(f"  nvidia-smi used: {used_gpu_mem:.2f} GB")
-                print(f"  nvidia-smi free: {free_gpu_mem:.2f} GB")
-                print(f"  FINAL VALUES (nvidia-smi): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                debug_log("GPU Memory Debugging (nvidia-smi):")
+                debug_log(f"  nvidia-smi total: {total_gpu_mem:.2f} GB")
+                debug_log(f"  nvidia-smi used: {used_gpu_mem:.2f} GB")
+                debug_log(f"  nvidia-smi free: {free_gpu_mem:.2f} GB")
+                debug_log(f"  FINAL VALUES (nvidia-smi): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
                 
                 return {
                     "used": used_gpu_mem,
@@ -213,7 +247,7 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                 }
             
         except Exception as e:
-            print(f"Error getting GPU metrics from nvidia-smi: {e}")
+            debug_log(f"Error getting GPU metrics from nvidia-smi: {e}")
             # Fall back to other methods
         
         # Fall back to NVML if nvidia-smi failed
@@ -234,10 +268,10 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                 free_gpu_mem = mem_info.free / (1024**3)
                 
                 # Print NVML values for debugging
-                print("GPU Memory Debugging (NVML):")
-                print(f"  NVML total: {total_gpu_mem:.2f} GB")
-                print(f"  NVML used: {used_gpu_mem:.2f} GB")
-                print(f"  NVML free: {free_gpu_mem:.2f} GB")
+                debug_log("GPU Memory Debugging (NVML):")
+                debug_log(f"  NVML total: {total_gpu_mem:.2f} GB")
+                debug_log(f"  NVML used: {used_gpu_mem:.2f} GB")
+                debug_log(f"  NVML free: {free_gpu_mem:.2f} GB")
                 
                 # Calculate percentage
                 usage_percent = (used_gpu_mem / total_gpu_mem) * 100
@@ -245,7 +279,7 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                 # Shut down NVML
                 pynvml.nvmlShutdown()
                 
-                print(f"  FINAL VALUES (NVML): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                debug_log(f"  FINAL VALUES (NVML): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
                 
                 return {
                     "used": used_gpu_mem,
@@ -255,12 +289,12 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                     "source": "nvml"
                 }
             except Exception as e:
-                print(f"Error getting GPU metrics from NVML: {e}")
+                debug_log(f"Error getting GPU metrics from NVML: {e}")
                 # Fall back to PyTorch metrics
                 pass
                 
         # Final fallback to PyTorch metrics if all else failed
-        print("GPU Memory Debugging (PyTorch fallback):")
+        debug_log("GPU Memory Debugging (PyTorch fallback):")
         total_gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
         reserved_gpu_mem = torch.cuda.memory_reserved(0) / (1024**3)  # GB
         allocated_gpu_mem = torch.cuda.memory_allocated(0) / (1024**3)  # GB
@@ -270,10 +304,10 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
         used_mem = reserved_gpu_mem  # Use reserved memory with NO padding
         usage_percent = (used_mem / total_gpu_mem) * 100 if total_gpu_mem > 0 else 0
         
-        print(f"  PyTorch total: {total_gpu_mem:.2f} GB")
-        print(f"  PyTorch reserved: {reserved_gpu_mem:.2f} GB")
-        print(f"  PyTorch allocated: {allocated_gpu_mem:.2f} GB")
-        print(f"  FINAL VALUES (PyTorch): used={used_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+        debug_log(f"  PyTorch total: {total_gpu_mem:.2f} GB")
+        debug_log(f"  PyTorch reserved: {reserved_gpu_mem:.2f} GB")
+        debug_log(f"  PyTorch allocated: {allocated_gpu_mem:.2f} GB")
+        debug_log(f"  FINAL VALUES (PyTorch): used={used_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
         
         return {
             "used": used_mem,  
@@ -321,12 +355,12 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                         free_gpu_mem = total_gpu_mem - used_gpu_mem
                         usage_percent = (used_gpu_mem / total_gpu_mem) * 100
                         
-                        print("GPU Memory Debugging (Apple Silicon):")
-                        print(f"  Apple model: {model_name}")
-                        print(f"  Approximate total: {total_gpu_mem:.2f} GB")
-                        print(f"  Estimated used: {used_gpu_mem:.2f} GB")
-                        print(f"  Estimated free: {free_gpu_mem:.2f} GB")
-                        print(f"  FINAL VALUES (Apple Silicon): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                        debug_log("GPU Memory Debugging (Apple Silicon):")
+                        debug_log(f"  Apple model: {model_name}")
+                        debug_log(f"  Approximate total: {total_gpu_mem:.2f} GB")
+                        debug_log(f"  Estimated used: {used_gpu_mem:.2f} GB")
+                        debug_log(f"  Estimated free: {free_gpu_mem:.2f} GB")
+                        debug_log(f"  FINAL VALUES (Apple Silicon): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
                         
                         return {
                             "used": used_gpu_mem,
@@ -337,15 +371,32 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                             "model": model_name
                         }
                 except Exception as e:
-                    print(f"Error getting Apple Silicon metrics: {e}")
+                    debug_log(f"Error getting Apple Silicon metrics: {e}")
                     # Fall back to a simple estimate
                     pass
-        
-        except:                    
-            print(f"Error getting Apple Silicon metrics: {e}")
+                    
+            # Fallback: Return estimated values
+            # For Apple Silicon, memory is dynamically shared with system memory,
+            # so return a simple approximation
+            system_memory = psutil.virtual_memory()
+            total_gpu_mem = system_memory.total / (1024**3) / 2  # Assume half of system memory is available for GPU
+            used_gpu_mem = total_gpu_mem * 0.25  # Just a placeholder
+            free_gpu_mem = total_gpu_mem - used_gpu_mem
+            usage_percent = 25.0  # Placeholder
+            
+            return {
+                "used": used_gpu_mem,
+                "total": total_gpu_mem,
+                "free": free_gpu_mem,
+                "usage_percent": usage_percent,
+                "source": "estimated",
+                "model": "Apple Silicon"
+            }
+        except Exception as e:
+            debug_log(f"Error getting Apple Silicon metrics: {e}")
             # Fall back to system memory info
             return get_system_memory_metrics(source="system-ram-fallback", model="Apple Silicon")
-        
+    
     # AMD GPU (ROCm)
     elif gpu_type == "amd" and AMD_ROCM_AVAILABLE:
         try:
@@ -379,12 +430,12 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                 name_out, _ = name_process.communicate()
                 gpu_name = name_out.decode('utf-8').strip().split('\n')[-1].strip()
                 
-                print("GPU Memory Debugging (ROCm):")
-                print(f"  AMD GPU: {gpu_name}")
-                print(f"  rocm-smi total: {total_gpu_mem:.2f} GB")
-                print(f"  rocm-smi used: {used_gpu_mem:.2f} GB")
-                print(f"  rocm-smi free: {free_gpu_mem:.2f} GB")
-                print(f"  FINAL VALUES (rocm-smi): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                debug_log("GPU Memory Debugging (ROCm):")
+                debug_log(f"  AMD GPU: {gpu_name}")
+                debug_log(f"  rocm-smi total: {total_gpu_mem:.2f} GB")
+                debug_log(f"  rocm-smi used: {used_gpu_mem:.2f} GB")
+                debug_log(f"  rocm-smi free: {free_gpu_mem:.2f} GB")
+                debug_log(f"  FINAL VALUES (rocm-smi): used={used_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
                 
                 return {
                     "used": used_gpu_mem,
@@ -395,7 +446,7 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                     "model": gpu_name
                 }
             except Exception as e:
-                print(f"Error getting AMD GPU metrics from rocm-smi: {e}")
+                debug_log(f"Error getting AMD GPU metrics from rocm-smi: {e}")
                 # Fall back to PyTorch metrics
                 pass
             
@@ -408,11 +459,11 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                 free_gpu_mem = total_gpu_mem - reserved_gpu_mem
                 usage_percent = (reserved_gpu_mem / total_gpu_mem) * 100 if total_gpu_mem > 0 else 0
                 
-                print("GPU Memory Debugging (PyTorch HIP):")
-                print(f"  PyTorch total: {total_gpu_mem:.2f} GB")
-                print(f"  PyTorch reserved: {reserved_gpu_mem:.2f} GB")
-                print(f"  PyTorch allocated: {allocated_gpu_mem:.2f} GB")
-                print(f"  FINAL VALUES (PyTorch HIP): used={reserved_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
+                debug_log("GPU Memory Debugging (PyTorch HIP):")
+                debug_log(f"  PyTorch total: {total_gpu_mem:.2f} GB")
+                debug_log(f"  PyTorch reserved: {reserved_gpu_mem:.2f} GB")
+                debug_log(f"  PyTorch allocated: {allocated_gpu_mem:.2f} GB")
+                debug_log(f"  FINAL VALUES (PyTorch HIP): used={reserved_gpu_mem:.2f}GB, total={total_gpu_mem:.2f}GB, percent={usage_percent:.2f}%")
                 
                 return {
                     "used": reserved_gpu_mem,
@@ -423,7 +474,7 @@ def get_memory_metrics(use_gpu=False, gpu_type=None):
                     "source": "pytorch-hip"
                 }
         except Exception as e:
-            print(f"Error getting AMD GPU metrics: {e}")
+            debug_log(f"Error getting AMD GPU metrics: {e}")
             # Fall back to system memory metrics
             return get_system_memory_metrics(source="system-ram-fallback", model="AMD GPU")
     
@@ -467,10 +518,10 @@ if cuda_available:
     device_count = torch.cuda.device_count()
     device_name = torch.cuda.get_device_name(0) if device_count > 0 else "Unknown"
     cuda_version = torch.version.cuda if hasattr(torch.version, 'cuda') else "Unknown"
-    print(f"CUDA is available: {cuda_available}")
-    print(f"CUDA version: {cuda_version}")
-    print(f"GPU count: {device_count}")
-    print(f"GPU device name: {device_name}")
+    debug_log(f"CUDA is available: {cuda_available}")
+    debug_log(f"CUDA version: {cuda_version}")
+    debug_log(f"GPU count: {device_count}")
+    debug_log(f"GPU device name: {device_name}")
     gpu_info = {
         "type": "nvidia",
         "name": device_name,
@@ -478,7 +529,7 @@ if cuda_available:
         "version": cuda_version
     }
 elif mps_available:
-    print("MPS (Apple Silicon) is available for GPU acceleration")
+    debug_log("MPS (Apple Silicon) is available for GPU acceleration")
     # Get Apple Silicon model info if possible
     model_name = "Apple Silicon"
     try:
@@ -489,7 +540,7 @@ elif mps_available:
     except:
         pass
     
-    print(f"Apple Silicon model: {model_name}")
+    debug_log(f"Apple Silicon model: {model_name}")
     gpu_info = {
         "type": "apple",
         "name": model_name,
@@ -497,7 +548,7 @@ elif mps_available:
         "version": platform.mac_ver()[0] if platform.system() == "Darwin" else "Unknown"
     }
 elif rocm_available:
-    print("ROCm is available for AMD GPU acceleration")
+    debug_log("ROCm is available for AMD GPU acceleration")
     hip_version = torch.version.hip if hasattr(torch.version, 'hip') else "Unknown"
     
     # Try to get AMD GPU name using rocm-smi
@@ -513,8 +564,8 @@ elif rocm_available:
     except:
         pass
     
-    print(f"ROCm version: {hip_version}")
-    print(f"AMD GPU name: {gpu_name}")
+    debug_log(f"ROCm version: {hip_version}")
+    debug_log(f"AMD GPU name: {gpu_name}")
     gpu_info = {
         "type": "amd",
         "name": gpu_name,
@@ -522,7 +573,7 @@ elif rocm_available:
         "version": hip_version
     }
 else:
-    print("No GPU acceleration is available. Running on CPU only.")
+    debug_log("No GPU acceleration is available. Running on CPU only.")
     gpu_info = {
         "type": "cpu",
         "name": "CPU",
@@ -547,28 +598,166 @@ def patch_streamlit_file_watcher():
     """Patch Streamlit's file watcher to handle torch.classes correctly."""
     try:
         import types
+        import importlib
         from streamlit.watcher import local_sources_watcher
         
-        # Original extraction function
+        # Get original implementation to patch
         original_extract_paths = local_sources_watcher._extract_module_paths
+        original_get_module_paths = local_sources_watcher.get_module_paths
         
-        # Create patched version
+        # Make a fully comprehensive patch that excludes all torch modules from inspection
+        def is_torch_module(module):
+            """Check if a module is a PyTorch module that should be excluded."""
+            if not hasattr(module, "__name__"):
+                return False
+                
+            name = module.__name__
+            return (name.startswith("torch") or 
+                    "_torch" in name or 
+                    "torch_" in name or 
+                    "torchaudio" in name)
+        
+        # Create patched version for module paths extraction
         def patched_extract_paths(module):
+            """Safe extraction of module paths that won't crash on torch modules."""
             try:
-                # Skip problematic torch modules
-                if hasattr(module, "__name__") and "torch.classes" in module.__name__:
+                # Skip any PyTorch module completely
+                if is_torch_module(module):
                     return []
+                
+                # For other modules, use the original function
                 return original_extract_paths(module)
             except Exception:
+                # For any other module that causes errors, return empty list
                 return []
         
-        # Apply the patch
+        # Patch get_module_paths to avoid processing torch modules
+        def patched_get_module_paths(module):
+            """Safely get module paths."""
+            try:
+                # Skip any PyTorch module completely
+                if is_torch_module(module):
+                    return []
+                    
+                # Handle the lambda m: list(m.__path__._path) case specifically
+                # This is the main source of errors with torch modules
+                if hasattr(module, "__name__") and not hasattr(module, "__path__"):
+                    return []
+                
+                return original_get_module_paths(module)
+            except Exception:
+                # For any other module that causes errors, return empty list
+                return []
+        
+        # Create a safety wrapper for module.__path__ access
+        class SafePathWrapper:
+            def __init__(self, module):
+                self.module = module
+                
+            @property
+            def __path__(self):
+                # Return a dummy path property with a safe _path attribute
+                if hasattr(self.module, "__path__") and hasattr(self.module.__path__, "_path"):
+                    return self.module.__path__
+                else:
+                    # Create a dummy object with a _path that won't crash when listed
+                    dummy = types.SimpleNamespace()
+                    dummy._path = []
+                    return dummy
+        
+        # Patch the specific pattern that causes the __path__._path access
+        original_import_module = importlib.import_module
+        
+        def safe_import_module(name, package=None):
+            """Wrapper for import_module that protects torch modules."""
+            module = original_import_module(name, package)
+            if is_torch_module(module):
+                # Return a wrapped module that won't crash on __path__._path access
+                return SafePathWrapper(module)
+            return module
+        
+        # Apply the patches
         local_sources_watcher._extract_module_paths = patched_extract_paths
+        local_sources_watcher.get_module_paths = patched_get_module_paths
+        importlib.import_module = safe_import_module
+        
+        # For additional safety, directly modify the lambda in the local_sources_watcher
+        # This is a bit of a hack, but it targets the exact source of the error
+        if hasattr(local_sources_watcher, "_get_paths_from_module_spec"):
+            # The function that contains the problematic lambda - patch each handler
+            original_get_paths = local_sources_watcher._get_paths_from_module_spec
+            
+            def patched_get_paths(spec):
+                """A safer version of _get_paths_from_module_spec."""
+                # If it's a torch module, return an empty list
+                if spec and hasattr(spec, "name") and (
+                    spec.name.startswith("torch") or 
+                    "_torch" in spec.name or 
+                    "torch_" in spec.name or 
+                    "torchaudio" in spec.name
+                ):
+                    return []
+                
+                # Otherwise use the original function
+                return original_get_paths(spec)
+            
+            # Apply this patch too
+            local_sources_watcher._get_paths_from_module_spec = patched_get_paths
+            
     except Exception as e:
-        print(f"Warning: Could not patch Streamlit file watcher: {e}")
+        if DEBUG_CONSOLE_OUTPUT:
+            print(f"Warning: Advanced Streamlit patch failed: {e}")
+        # Try simple patch as fallback
+        try:
+            from streamlit.watcher import local_sources_watcher
+            
+            # Simple blacklist approach as fallback
+            def simple_extract_paths(module):
+                if (hasattr(module, "__name__") and 
+                    ("torch" in module.__name__ or "torchaudio" in module.__name__)):
+                    return []
+                try:
+                    if hasattr(local_sources_watcher, "_extract_module_paths"):
+                        original = local_sources_watcher._extract_module_paths
+                        return original(module)
+                    else:
+                        return []
+                except:
+                    return []
+            
+            # Apply simple patch
+            if hasattr(local_sources_watcher, "_extract_module_paths"):
+                local_sources_watcher._extract_module_paths = simple_extract_paths
+                
+        except Exception as e2:
+            if DEBUG_CONSOLE_OUTPUT:
+                print(f"Warning: Streamlit simple patch also failed: {e2}")
 
 # Apply the Streamlit patch
 patch_streamlit_file_watcher()
+
+def safe_remove_file(file_path, max_retries=3, retry_delay=0.5):
+    """Safely remove a file with retries, suppressing errors if the file can't be deleted."""
+    for attempt in range(max_retries):
+        try:
+            os.unlink(file_path)
+            return True  # Successfully removed
+        except PermissionError:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)  # Wait before retrying
+            else:
+                # On last attempt, just log it and continue
+                if os.path.exists(file_path):
+                    if DEBUG_CONSOLE_OUTPUT or st.session_state.get('debug_mode', False):
+                        print(f"Warning: Could not remove temporary file: {file_path}")
+                return False
+        except FileNotFoundError:
+            # File already gone
+            return True
+        except Exception as e:
+            if DEBUG_CONSOLE_OUTPUT or st.session_state.get('debug_mode', False):
+                print(f"Error removing file {file_path}: {e}")
+            return False
 
 def torch_parameter_hash(parameter):
     return parameter.data.numpy().tobytes()
@@ -651,27 +840,6 @@ def load_wav2vec2_model(model_name="facebook/wav2vec2-base-960h", use_gpu=False)
         st.error(f"Error loading Wav2Vec2 model: {e}")
         raise
 
-def safe_remove_file(file_path, max_retries=3, retry_delay=0.5):
-    """Safely remove a file with retries, suppressing errors if the file can't be deleted."""
-    for attempt in range(max_retries):
-        try:
-            os.unlink(file_path)
-            return True  # Successfully removed
-        except PermissionError:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)  # Wait before retrying
-            else:
-                # On last attempt, just log it and continue
-                if os.path.exists(file_path):
-                    print(f"Warning: Could not remove temporary file: {file_path}")
-                return False
-        except FileNotFoundError:
-            # File already gone
-            return True
-        except Exception as e:
-            print(f"Error removing file {file_path}: {e}")
-            return False
-
 def transcribe_whisper_segment(audio_path, start_time, end_time, model, sample_rate=16000, language=None, task="transcribe"):
     """Transcribe or translate a specific audio segment using Whisper"""
     try:
@@ -701,55 +869,54 @@ def transcribe_whisper_segment(audio_path, start_time, end_time, model, sample_r
             
             # Add debug output to console
             if hasattr(info, 'language') and info.language:
-                print(f"Debug - TranscriptionInfo object found with language: {info.language}, Probability: {info.language_probability:.2f}")
+                debug_log(f"Debug - TranscriptionInfo object found with language: {info.language}, Probability: {info.language_probability:.2f}")
                 
                 # Check all available attributes of info
-                print("Debug - TranscriptionInfo object attributes:", dir(info))
+                debug_log("Debug - TranscriptionInfo object attributes:" + str(dir(info)))
                 
                 # Verify access to language attribute directly
                 try:
                     language_attr = getattr(info, 'language')
-                    print(f"Debug - Direct attribute access: info.language = '{language_attr}'")
+                    debug_log(f"Debug - Direct attribute access: info.language = '{language_attr}'")
                 except Exception as e:
-                    print(f"Debug - Error accessing language attribute: {e}")
+                    debug_log(f"Debug - Error accessing language attribute: {e}")
                 
                 # Try to get the language using __dict__ if available
                 if hasattr(info, '__dict__'):
-                    print(f"Debug - info.__dict__ = {info.__dict__}")
+                    debug_log(f"Debug - info.__dict__ = {info.__dict__}")
                 
                 # Try alternative methods to get language
                 try:
                     language_str = str(info)
-                    print(f"Debug - info as string: {language_str}")
+                    debug_log(f"Debug - info as string: {language_str}")
                 except Exception as e:
-                    print(f"Debug - Error converting info to string: {e}")
+                    debug_log(f"Debug - Error converting info to string: {e}")
             else:
-                print("Debug - info object doesn't have language attribute or is None")
+                debug_log("Debug - info object doesn't have language attribute or is None")
             
             # Handle info whether it's a dictionary or TranscriptionInfo object
             try:
                 # Try to get language as attribute (TranscriptionInfo object in newer versions)
                 if hasattr(info, 'language') and info.language:
                     lang_code = info.language
-                    print(f"Debug - Got lang_code='{lang_code}' from info.language attribute")
+                    debug_log(f"Debug - Got lang_code='{lang_code}' from info.language attribute")
                 # Try to get language as dictionary key (older versions)
                 elif isinstance(info, dict) and "language" in info and info["language"]:
                     lang_code = info["language"]
-                    print(f"Debug - Got lang_code='{lang_code}' from info dictionary")
+                    debug_log(f"Debug - Got lang_code='{lang_code}' from info dictionary")
                 else:
                     lang_code = None
-                    print("Debug - No language code found in info object")
+                    debug_log("Debug - No language code found in info object")
                 
                 # Map language code to full name if we have a language code
                 if lang_code:
                     detected_language = WHISPER_LANGUAGE_MAP.get(lang_code, lang_code.title())
-                    print(f"Debug - Mapped language '{lang_code}' to '{detected_language}' from map: {WHISPER_LANGUAGE_MAP.get(lang_code)}")
-            
+                    debug_log(f"Debug - Mapped language '{lang_code}' to '{detected_language}' from map: {WHISPER_LANGUAGE_MAP.get(lang_code)}")
             except Exception as lang_err:
                 # If we can't get language info, just proceed without it
                 if st.session_state.get('debug_mode', False):
                     st.sidebar.warning(f"Language detection issue: {lang_err}")
-                print(f"Debug - Language detection failed with error: {lang_err}")
+                debug_log(f"Debug - Language detection failed with error: {lang_err}")
                 traceback.print_exc()  # Print the full error traceback
                 
                 # Last attempt to extract language from string representation
@@ -761,18 +928,11 @@ def transcribe_whisper_segment(audio_path, start_time, end_time, model, sample_r
                         lang_end = info_str.find("'", lang_start)
                         if lang_start > 10 and lang_end > lang_start:
                             extracted_lang = info_str[lang_start:lang_end]
-                            print(f"Debug - Extracted language from string: '{extracted_lang}'")
-                            """
-                            # Handle Japanese specifically
-                            if extracted_lang == "ja":
-                                detected_language = "Japanese"
-                            else:
-                                detected_language = extracted_lang.title()
-                            """
+                            debug_log(f"Debug - Extracted language from string: '{extracted_lang}'")
                             detected_language = extracted_lang.title()
 
                 except Exception as e:
-                    print(f"Debug - Failed to extract language from string: {e}")
+                    debug_log(f"Debug - Failed to extract language from string: {e}")
                 
                 # Is this setting language to None?
                 detected_language = None
@@ -1543,7 +1703,7 @@ if uploaded_file is not None:
                             )
                             
                             # Debug print to verify detected language
-                            print(f"Segment {segment_count} - Detected Language from Whisper: {detected_language}")
+                            debug_log(f"Segment {segment_count} - Detected Language from Whisper: {detected_language}")
                             
                         elif model_type == "wav2vec2":
                             segment_text, detected_language = transcribe_wav2vec2_segment(
@@ -2083,14 +2243,20 @@ if uploaded_file is not None:
             with translation_expander:
                 st.markdown(f"*{len(non_preferred_segments)} segments detected in languages other than {st.session_state.preferred_language}*")
                 
-                # Automatically select translation method based on target language
-                # - Whisper for English (faster)
-                # - Neural MT for other languages (supports all language pairs)
+                # Get system platform to determine available translation models
+                system_platform = platform.system().lower()
+                
+                # Automatically select translation method based on target language and platform
+                # - Whisper for English (fast but English-only target)
+                # - Seamless M4T on Linux or NLLB on Windows/macOS (for all language pairs)
                 if st.session_state.preferred_language == "English":
                     translation_method = "Whisper (Fast, English only)"
                     default_target = "English"
                 else:
-                    translation_method = "Neural Machine Translation (All languages)"
+                    if system_platform == "linux":
+                        translation_method = "Seamless M4T (Multi-language)"
+                    else:
+                        translation_method = "NLLB (Multi-language)"
                     default_target = st.session_state.preferred_language
                 
                 # Add target language selection
@@ -2101,10 +2267,22 @@ if uploaded_file is not None:
                     key="target_language"
                 )
                 
-                # If Whisper is selected and target is not English, switch to Neural MT
+                # If Whisper is selected and target is not English, switch to appropriate multi-language model
                 if "Whisper" in translation_method and target_language != "English":
-                    translation_method = "Neural Machine Translation (All languages)"
-                    st.info("Switched to Neural MT for non-English target language")
+                    if system_platform == "linux":
+                        translation_method = "Seamless M4T (Multi-language)"
+                        st.info("Switched to Seamless M4T for non-English target language")
+                    else:
+                        translation_method = "NLLB (Multi-language)"
+                        st.info("Switched to NLLB for non-English target language")
+                
+                # Add model explanation based on the selected method
+                if "Whisper" in translation_method:
+                    st.caption("Whisper provides fast translation but only supports English as a target language")
+                elif "Seamless" in translation_method:
+                    st.caption("Seamless M4T is a powerful multilingual model that supports many language pairs")
+                elif "NLLB" in translation_method:
+                    st.caption("NLLB (No Language Left Behind) supports translation between 200+ languages")
                 
                 # Change the translate all button text
                 translate_button_text = f"Translate All Segments to {target_language}"
@@ -2151,7 +2329,7 @@ if uploaded_file is not None:
                                     "method": translation_method
                                 }
                                 # We'll process translations at the end rather than rerunning immediately
-            
+                
             # Modify the translate all button handler to process all segments in the transcript
             if translate_all:
                 # Process ALL segments, not just non-preferred ones
@@ -2162,6 +2340,15 @@ if uploaded_file is not None:
                     if entry["language"] == target_language:
                         continue
                     
+                    # Determine which translation method to use based on target language and platform
+                    if target_language == "English":
+                        selected_method = "Whisper (Fast, English only)"
+                    else:
+                        if system_platform == "linux":
+                            selected_method = "Seamless M4T (Multi-language)"
+                        else:
+                            selected_method = "NLLB (Multi-language)"
+                    
                     # Check if we need to retranslate (new target language)
                     needs_retranslation = True
                     if segment_key in st.session_state.translated_segments:
@@ -2169,7 +2356,7 @@ if uploaded_file is not None:
                         # Only mark for retranslation if target language changed or not already translated
                         if (current_info["translated_text"] is not None and 
                             current_info["target_language"] == target_language and
-                            current_info["method"] == translation_method):
+                            current_info["method"] == selected_method):
                             needs_retranslation = False
                     
                     if needs_retranslation:
@@ -2181,7 +2368,7 @@ if uploaded_file is not None:
                             "original": segment_obj,
                             "translated_text": None,
                             "target_language": target_language,
-                            "method": translation_method
+                            "method": selected_method
                         }
                 
                 # Only trigger rerun if there are segments to translate
@@ -2198,17 +2385,26 @@ if uploaded_file is not None:
                 if pending_translations:
                     # Group translations by method
                     whisper_translations = []
-                    nmt_translations = []
+                    seamless_translations = []
+                    nllb_translations = []
                     
                     for segment_key in pending_translations:
                         segment_info = st.session_state.translated_segments[segment_key]
-                        method = segment_info.get("method", "Neural Machine Translation (Accurate for non-English targets)")
+                        method = segment_info.get("method", "")
                         
-                        # If target is English and method is Whisper, or if method explicitly selects Whisper
-                        if (st.session_state.preferred_language == "English" and "Whisper" in method) or "Whisper" in method:
+                        # Sort translations into appropriate groups based on method
+                        if "Whisper" in method:
                             whisper_translations.append(segment_key)
+                        elif "Seamless" in method:
+                            seamless_translations.append(segment_key)
+                        elif "NLLB" in method:
+                            nllb_translations.append(segment_key)
                         else:
-                            nmt_translations.append(segment_key)
+                            # For backward compatibility or unspecified methods
+                            if system_platform == "linux":
+                                seamless_translations.append(segment_key)
+                            else:
+                                nllb_translations.append(segment_key)
                     
                     # Process Whisper translations first (faster)
                     if whisper_translations:
@@ -2282,158 +2478,164 @@ if uploaded_file is not None:
                             if translation_performed and whisper_translations:
                                 st.success("Whisper translation completed!")
                     
-                    # Process remaining translations with NMT if needed
-                    if nmt_translations:
-                        with st.spinner(f"Translating {len(nmt_translations)} segments with Neural MT..."):
-                            # Use the appropriate translation model based on platform
-                            system_platform = platform.system().lower()
-                            
-                            if system_platform == "linux":
-                                try:
-                                    from seamless_communication.inference import Translator
+                    # Process translations with Seamless M4T on Linux
+                    if seamless_translations and system_platform == "linux":
+                        with st.spinner(f"Translating {len(seamless_translations)} segments with Seamless M4T..."):
+                            try:
+                                from seamless_communication.inference import Translator
+                                
+                                device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
+                                torch_dtype = torch.float16 if use_gpu and torch.cuda.is_available() else torch.float32
+                                
+                                translator = Translator(
+                                    "facebook/seamless-m4t-v2-large",
+                                    "vocoder_36langs",
+                                    device,
+                                    torch_dtype
+                                )
+                                
+                                # Language code mapping for Seamless M4T
+                                language_map = {
+                                    "English": "eng", "Spanish": "spa", "French": "fra", "German": "deu", 
+                                    "Italian": "ita", "Portuguese": "por", "Chinese": "cmn", "Japanese": "jpn", 
+                                    "Korean": "kor", "Arabic": "arb", "Russian": "rus"
+                                }
+                                
+                                progress_bar = st.progress(0)
+                                
+                                for i, segment_key in enumerate(seamless_translations):
+                                    segment_info = st.session_state.translated_segments[segment_key]
+                                    original_segment = segment_info["original"]
+                                    source_text = original_segment["text"]
+                                    target_lang_code = language_map.get(segment_info["target_language"], "eng")
                                     
-                                    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
-                                    torch_dtype = torch.float16 if use_gpu and torch.cuda.is_available() else torch.float32
+                                    # Detect source language
+                                    source_lang_code = language_map.get(original_segment["language"], None)
                                     
-                                    translator = Translator(
-                                        "facebook/seamless-m4t-v2-large",
-                                        "vocoder_36langs",
-                                        device,
-                                        torch_dtype
-                                    )
-                                    
-                                    # Language code mapping
-                                    language_map = {
-                                        "English": "eng", "Spanish": "spa", "French": "fra", "German": "deu", 
-                                        "Italian": "ita", "Portuguese": "por", "Chinese": "cmn", "Japanese": "jpn", 
-                                        "Korean": "kor", "Arabic": "arb", "Russian": "rus"
-                                    }
-                                    
-                                    progress_bar = st.progress(0)
-                                    
-                                    for i, segment_key in enumerate(nmt_translations):
-                                        segment_info = st.session_state.translated_segments[segment_key]
-                                        original_segment = segment_info["original"]
-                                        source_text = original_segment["text"]
-                                        target_lang_code = language_map.get(segment_info["target_language"], "eng")
+                                    try:
+                                        # Translate the text using Seamless M4T
+                                        result = translator.predict(
+                                            source_text,
+                                            "T2TT",  # Text to text translation
+                                            tgt_lang=target_lang_code,
+                                            src_lang=source_lang_code
+                                        )
                                         
-                                        # Detect source language
-                                        source_lang_code = language_map.get(original_segment["language"], None)
+                                        # Store the translated text
+                                        st.session_state.translated_segments[segment_key]["translated_text"] = result.text
+                                        translation_performed = True
+                                    except Exception as e:
+                                        st.error(f"Seamless M4T translation error: {e}")
+                                        # Set a placeholder for failed translations
+                                        st.session_state.translated_segments[segment_key]["translated_text"] = f"[Translation failed: {e}]"
+                                    
+                                    # Update progress
+                                    progress_bar.progress((i + 1) / len(seamless_translations))
+                                
+                                # Clear progress when done
+                                progress_bar.empty()
+                                if translation_performed and seamless_translations:
+                                    st.success("Seamless M4T translation completed!")
+                                    
+                            except ImportError:
+                                st.error("""
+                                Seamless Communication package is not available for translation.
+                                Please run the installation script:
+                                ```
+                                ./run.sh
+                                ```
+                                """)
+                    
+                    # Process translations with NLLB on Windows/macOS
+                    if nllb_translations and system_platform != "linux":
+                        with st.spinner(f"Translating {len(nllb_translations)} segments with NLLB..."):
+                            try:
+                                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, pipeline
+                                
+                                # Use NLLB 200-language model for translation
+                                model_name = "facebook/nllb-200-distilled-600M"
+                                
+                                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                                model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+                                
+                                if use_gpu and torch.cuda.is_available():
+                                    model = model.to("cuda")
+                                
+                                # NLLB language code mapping (different from Seamless)
+                                language_map = {
+                                    "English": "eng_Latn", "Spanish": "spa_Latn", "French": "fra_Latn", 
+                                    "German": "deu_Latn", "Italian": "ita_Latn", "Portuguese": "por_Latn", 
+                                    "Chinese": "zho_Hans", "Japanese": "jpn_Jpan", "Korean": "kor_Hang", 
+                                    "Arabic": "ara_Arab", "Russian": "rus_Cyrl", "Turkish": "tur_Latn",
+                                    "Dutch": "nld_Latn", "Polish": "pol_Latn", "Romanian": "ron_Latn",
+                                    "Ukrainian": "ukr_Cyrl", "Czech": "ces_Latn", "Hungarian": "hun_Latn",
+                                    "Finnish": "fin_Latn", "Swedish": "swe_Latn", "Greek": "ell_Grek",
+                                    "Bulgarian": "bul_Cyrl", "Danish": "dan_Latn", "Norwegian": "nob_Latn",
+                                    "Catalan": "cat_Latn", "Hebrew": "heb_Hebr", "Indonesian": "ind_Latn",
+                                    "Thai": "tha_Thai", "Vietnamese": "vie_Latn", "Hindi": "hin_Deva",
+                                    "Bengali": "ben_Beng", "Tamil": "tam_Taml", "Telugu": "tel_Telu",
+                                    "Urdu": "urd_Arab", "Swahili": "swh_Latn", "Welsh": "cym_Latn"
+                                }
+                                
+                                # Create translation pipeline
+                                translator = pipeline("translation", model=model, tokenizer=tokenizer)
+                                
+                                progress_bar = st.progress(0)
+                                
+                                for i, segment_key in enumerate(nllb_translations):
+                                    segment_info = st.session_state.translated_segments[segment_key]
+                                    original_segment = segment_info["original"]
+                                    source_text = original_segment["text"]
+                                    target_lang_code = language_map.get(segment_info["target_language"], "eng_Latn")
+                                    
+                                    # Detect source language
+                                    source_lang_code = language_map.get(original_segment["language"], "eng_Latn")
+                                    
+                                    try:
+                                        # Translate the text using NLLB model
+                                        translation = translator(
+                                            source_text, 
+                                            src_lang=source_lang_code, 
+                                            tgt_lang=target_lang_code,
+                                            max_length=512
+                                        )
                                         
-                                        try:
-                                            # Translate the text
-                                            result = translator.predict(
-                                                source_text,
-                                                "T2TT",  # Text to text translation
-                                                tgt_lang=target_lang_code,
-                                                src_lang=source_lang_code
-                                            )
-                                            
-                                            # Store the translated text
-                                            st.session_state.translated_segments[segment_key]["translated_text"] = result.text
-                                            translation_performed = True
-                                        except Exception as e:
-                                            st.error(f"Translation error: {e}")
-                                            # Set a placeholder for failed translations
-                                            st.session_state.translated_segments[segment_key]["translated_text"] = f"[Translation failed: {e}]"
+                                        # Get translated text from the result
+                                        translated_text = translation[0]["translation_text"]
                                         
-                                        # Update progress
-                                        progress_bar.progress((i + 1) / len(nmt_translations))
+                                        # Store the translated text
+                                        st.session_state.translated_segments[segment_key]["translated_text"] = translated_text
+                                        translation_performed = True
+                                    except Exception as e:
+                                        st.error(f"NLLB translation error: {e}")
+                                        # Set a placeholder for failed translations
+                                        st.session_state.translated_segments[segment_key]["translated_text"] = f"[Translation failed: {e}]"
                                     
-                                    # Clear progress when done
-                                    progress_bar.empty()
-                                    if translation_performed and nmt_translations:
-                                        st.success("Neural translation completed!")
-                                        
-                                except ImportError:
-                                    st.error("""
-                                    Seamless Communication package is not available for translation.
-                                    Please run the installation script:
-                                    ```
-                                    ./run.sh
-                                    ```
-                                    """)
-                            else:
-                                # Windows/macOS implementation using transformers
-                                try:
-                                    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, pipeline
+                                    # Update progress
+                                    progress_bar.progress((i + 1) / len(nllb_translations))
+                                
+                                # Clear progress when done
+                                progress_bar.empty()
+                                if translation_performed and nllb_translations:
+                                    st.success("NLLB translation completed!")
                                     
-                                    # Use a smaller model that works well for text translation
-                                    model_name = "facebook/nllb-200-distilled-600M"
-                                    
-                                    tokenizer = AutoTokenizer.from_pretrained(model_name)
-                                    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-                                    
-                                    if use_gpu and torch.cuda.is_available():
-                                        model = model.to("cuda")
-                                    
-                                    # NLLB language code mapping (different from Seamless)
-                                    language_map = {
-                                        "English": "eng_Latn", "Spanish": "spa_Latn", "French": "fra_Latn", 
-                                        "German": "deu_Latn", "Italian": "ita_Latn", "Portuguese": "por_Latn", 
-                                        "Chinese": "zho_Hans", "Japanese": "jpn_Jpan", "Korean": "kor_Hang", 
-                                        "Arabic": "ara_Arab", "Russian": "rus_Cyrl", "Turkish": "tur_Latn",
-                                        "Dutch": "nld_Latn", "Polish": "pol_Latn", "Romanian": "ron_Latn",
-                                        "Ukrainian": "ukr_Cyrl", "Czech": "ces_Latn", "Hungarian": "hun_Latn",
-                                        "Finnish": "fin_Latn", "Swedish": "swe_Latn", "Greek": "ell_Grek",
-                                        "Bulgarian": "bul_Cyrl", "Danish": "dan_Latn", "Norwegian": "nob_Latn",
-                                        "Catalan": "cat_Latn", "Hebrew": "heb_Hebr", "Indonesian": "ind_Latn",
-                                        "Thai": "tha_Thai", "Vietnamese": "vie_Latn", "Hindi": "hin_Deva",
-                                        "Bengali": "ben_Beng", "Tamil": "tam_Taml", "Telugu": "tel_Telu",
-                                        "Urdu": "urd_Arab", "Swahili": "swh_Latn", "Welsh": "cym_Latn"
-                                    }
-                                    
-                                    # Create translation pipeline
-                                    translator = pipeline("translation", model=model, tokenizer=tokenizer)
-                                    
-                                    progress_bar = st.progress(0)
-                                    
-                                    for i, segment_key in enumerate(nmt_translations):
-                                        segment_info = st.session_state.translated_segments[segment_key]
-                                        original_segment = segment_info["original"]
-                                        source_text = original_segment["text"]
-                                        target_lang_code = language_map.get(segment_info["target_language"], "eng_Latn")
-                                        
-                                        # Detect source language
-                                        source_lang_code = language_map.get(original_segment["language"], "eng_Latn")
-                                        
-                                        try:
-                                            # Translate the text using NLLB model
-                                            translation = translator(
-                                                source_text, 
-                                                src_lang=source_lang_code, 
-                                                tgt_lang=target_lang_code,
-                                                max_length=512
-                                            )
-                                            
-                                            # Get translated text from the result
-                                            translated_text = translation[0]["translation_text"]
-                                            
-                                            # Store the translated text
-                                            st.session_state.translated_segments[segment_key]["translated_text"] = translated_text
-                                            translation_performed = True
-                                        except Exception as e:
-                                            st.error(f"Translation error: {e}")
-                                            # Set a placeholder for failed translations
-                                            st.session_state.translated_segments[segment_key]["translated_text"] = f"[Translation failed: {e}]"
-                                        
-                                        # Update progress
-                                        progress_bar.progress((i + 1) / len(nmt_translations))
-                                    
-                                    # Clear progress when done
-                                    progress_bar.empty()
-                                    if translation_performed and nmt_translations:
-                                        st.success("Neural translation completed!")
-                                        
-                                except ImportError:
-                                    st.error("""
-                                    Transformers library is not properly installed for translation.
-                                    Please run the installation script:
-                                    ```
-                                    run.bat  # On Windows
-                                    ./run.sh  # On macOS
-                                    ```
-                                    """)
+                            except ImportError:
+                                st.error("""
+                                Transformers library is not properly installed for translation.
+                                Please run the installation script:
+                                ```
+                                run.bat  # On Windows
+                                ./run.sh  # On macOS
+                                ```
+                                """)
+                    
+                    # Check if any translations are left from the original allocation
+                    # This can happen if the platform doesn't match the expected one
+                    remaining_translations = [k for k, v in st.session_state.translated_segments.items() 
+                                             if v["translated_text"] is None and k in pending_translations]
+                    
+                    if remaining_translations:
+                        st.warning(f"{len(remaining_translations)} segments could not be translated with the selected method. Please try a different method.")
             
             # If translations were performed, trigger a rerun to update the display
             if translation_performed:
