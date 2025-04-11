@@ -22,6 +22,9 @@ import types
 # import sys
 import logging
 
+#if you have / need to use a huggingface token, set it here
+HF_TOKEN = ""
+
 #keep streamlit from whining about torch.classes    
 torch.classes.__path__ = []
 
@@ -781,7 +784,7 @@ def get_device_for_model(use_gpu=False):
 def load_diarization_model(use_gpu=False):
     '''Load the speaker diarization model'''
     try:
-        hf_token = "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"
+        hf_token = "HF_TOKEN"
         pipeline = paa.Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
             use_auth_token=hf_token
